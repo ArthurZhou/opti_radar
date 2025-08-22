@@ -5,6 +5,10 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8"
+nalgebra = "0.32.3"
+
+[dev-dependencies]
+criterion = "0.4"
 
 [lib]
 name = "opti_radar"
@@ -17,3 +21,7 @@ path = "src/main.rs"
 [[test]]
 name = "integration_test"
 path = "tests/integration_test.rs"
+
+[[bench]]
+name = "benchmark"
+harness = false
