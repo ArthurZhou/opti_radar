@@ -19,8 +19,8 @@ name = "opti_radar_main"
 path = "src/main.rs"
 
 [[test]]
-name = "integration_test"
-path = "tests/integration_test.rs"
+name = "accuracy"
+path = "tests/accuracy.rs"
 
 [[bench]]
 name = "benchmark"

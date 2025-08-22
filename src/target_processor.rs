@@ -26,11 +26,18 @@ pub struct LocatedTarget {
 }
 
 #[derive(Clone, Copy)]
-struct Line {
-    start: Point3<f64>,
-    direction: Vector3<f64>,
+pub struct Line {
+    pub start: Point3<f64>,
+    pub direction: Vector3<f64>,
 }
 
+/// 将 Measurement 结构体转换为 Line 结构体，并归一化方向向量。
+///
+/// # 参数
+/// * `m` - 一个 `Measurement` 的引用。
+///
+/// # 返回值
+/// 相应的 `Line` 结构体，其中方向向量已被归一化。
 fn get_line(m: &Measurement) -> Line {
     let start_point = Point3::new(m.x, m.y, m.z);
     let direction = Vector3::new(m.direction_x, m.direction_y, m.direction_z).normalize();
@@ -40,6 +47,16 @@ fn get_line(m: &Measurement) -> Line {
     }
 }
 
+/// 计算两条空间光线之间最短距离的中点。
+///
+/// 此中点作为这两条光线所代表的目标位置的一个初步近似。
+///
+/// # 参数
+/// * `line1` - 第一个 `Line` 的引用。
+/// * `line2` - 第二个 `Line` 的引用。
+///
+/// # 返回值
+/// 一个 `Point3<f64>`，表示两光线最短距离的中点。
 fn find_closest_midpoint(line1: &Line, line2: &Line) -> Point3<f64> {
     let w0 = line1.start - line2.start;
     let a = line1.direction.dot(&line1.direction);
@@ -58,7 +75,19 @@ fn find_closest_midpoint(line1: &Line, line2: &Line) -> Point3<f64> {
     Point3::from((closest_point1.coords + closest_point2.coords) * 0.5)
 }
 
-fn gradient_descent_optimize(
+/// 使用梯度下降法优化目标位置。
+///
+/// 它通过最小化目标点到所有光线的距离平方和来寻找最优解。
+///
+/// # 参数
+/// * `lines` - 参与优化的光线集合。
+/// * `initial_guess` - 优化过程的初始猜测位置。
+/// * `learning_rate` - 梯度下降的学习率，控制每次迭代的步长。
+/// * `iterations` - 梯度下降的迭代次数。
+///
+/// # 返回值
+/// 一个 `Point3<f64>`，表示经过优化后的目标位置。
+pub fn gradient_descent_optimize(
     lines: &[Line],
     initial_guess: Point3<f64>,
     learning_rate: f64,
@@ -80,7 +109,17 @@ fn gradient_descent_optimize(
     current_pos
 }
 
-fn ransac_fit_lines(
+/// 使用 RANSAC 算法从包含异常值的光线中，找到最佳拟合的光线子集（即“内点”）。
+///
+/// # 参数
+/// * `all_lines` - 包含所有测量光线的向量。
+/// * `ransac_iterations` - RANSAC 算法的迭代次数。
+/// * `ransac_threshold` - 判断一条光线是否为内点的距离阈值。
+/// * `min_lines` - 识别一个目标所需的最小内点数量，低于此数量则认为未找到有效模型。
+///
+/// # 返回值
+/// 一个 `Option<(Point3<f64>, Vec<usize>)>`。如果找到一个有效的模型，它将返回一个包含初始猜测位置和内点索引的元组；否则返回 `None`。
+pub fn ransac_fit_lines(
     all_lines: &[Line],
     ransac_iterations: usize,
     ransac_threshold: f64,
@@ -133,6 +172,17 @@ fn ransac_fit_lines(
     }
 }
 
+/// 从所有测量数据中识别并定位多个目标。
+///
+/// 它通过一个循环，重复执行 RANSAC 和梯度下降过程，直到所有可识别的目标都被找到。
+///
+/// # 参数
+/// * `data` - 包含所有原始 `Measurement` 数据的切片。
+/// * `ransac_threshold_m` - RANSAC 算法的距离阈值。
+/// * `min_lines_per_target` - 识别一个目标所需的最小测量线数量。
+///
+/// # 返回值
+/// 一个 `Vec<LocatedTarget>`，其中包含所有成功定位的目标信息。
 pub fn find_targets(
     data: &[Measurement],
     ransac_threshold_m: f64,
