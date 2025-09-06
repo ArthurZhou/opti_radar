@@ -94,9 +94,9 @@ pub fn levenberg_marquardt_optimize(
 ## 实验数据
 
 运行 `charts.py` 可以自动生成可视化数据图表(需要先执行 `cargo build`，非Windows环境请修改python文件中的可执行文件位置)，某一次运行的结果如下：
-[](./sample_result.png)
+![result](./sample_result.png)
 
-[](./sample_accuracy.png)
+![accuracy](./sample_accuracy.png)
 
 ## 参考文献
 
