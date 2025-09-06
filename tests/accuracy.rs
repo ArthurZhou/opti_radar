@@ -19,10 +19,11 @@ fn run_test_case(
     alt_noise_std: f64,
     angle_noise_std: f64,
     ransac_threshold: f64,
-) -> (f64, usize) {
+) -> (f64, usize, usize) {
     let mut total_overall_error_sum = 0.0;
     let mut successful_runs_count = 0;
-    
+    let mut total_matched_targets_count = 0;
+
     println!("\n--- 正在进行 '{}' 测试 ({} 次运行) ---", case_name, num_runs);
 
     for run_count in 1..=num_runs {
@@ -72,6 +73,7 @@ fn run_test_case(
             let avg_run_error = run_error_sum / matched_targets_count as f64;
             total_overall_error_sum += avg_run_error;
             successful_runs_count += 1;
+            total_matched_targets_count += matched_targets_count;
             println!("第{}次运行：成功匹配 {}/{} 个目标，平均误差: {:.2} 米", run_count, matched_targets_count, num_targets, avg_run_error);
         } else {
             println!("第{}次运行：未成功匹配任何目标，本次运行被忽略。", run_count);
@@ -85,7 +87,7 @@ fn run_test_case(
     };
 
     println!("\n'{}' 测试完成: {} 次成功运行的整体平均误差: {:.2} 米", case_name, successful_runs_count, overall_avg_error);
-    (overall_avg_error, successful_runs_count)
+    (overall_avg_error, successful_runs_count, total_matched_targets_count)
 }
 
 #[test]
@@ -93,7 +95,7 @@ fn test_localization_accuracy() {
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let (overall_avg_error, successful_runs) = run_test_case(
+        let (overall_avg_error, successful_runs, total_matched_targets) = run_test_case(
             "一般精度",
             10,
             3,
@@ -108,13 +110,17 @@ fn test_localization_accuracy() {
             0.005,
             20.0,
         );
-        if overall_avg_error < 20.0 {
+        let total_possible_targets = 10 * 3;
+        let success_rate = total_matched_targets as f64 / total_possible_targets as f64;
+        
+        if overall_avg_error < 20.0 && success_rate >= 0.8 {
             println!("第 {} 次尝试成功通过。", attempts);
+            println!("总匹配目标数: {} / {}", total_matched_targets, total_possible_targets);
             break;
         } else {
             if attempts >= 3 {
-                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (20.0 米) after {} attempts.",
-                       successful_runs, overall_avg_error, attempts);
+                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (20.0 米) or low success rate after {} attempts. Total matched targets: {} / {}.",
+                        successful_runs, overall_avg_error, attempts, total_matched_targets, total_possible_targets);
             }
             println!("第 {} 次尝试失败，正在重试...", attempts);
         }
@@ -126,7 +132,7 @@ fn test_localization_with_high_noise() {
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let (overall_avg_error, successful_runs) = run_test_case(
+        let (overall_avg_error, successful_runs, total_matched_targets) = run_test_case(
             "高噪声",
             5,
             2,
@@ -141,14 +147,18 @@ fn test_localization_with_high_noise() {
             0.02, // Higher angle noise
             50.0,
         );
+        let total_possible_targets = 5 * 2;
+        let success_rate = total_matched_targets as f64 / total_possible_targets as f64;
+        
         // In this high-noise scenario, a larger error is acceptable.
-        if overall_avg_error < 100.0 && successful_runs as f64 / 5.0 > 0.6 {
+        if overall_avg_error < 100.0 && successful_runs as f64 / 5.0 > 0.6 && success_rate >= 0.7 {
             println!("第 {} 次尝试成功通过。", attempts);
+            println!("总匹配目标数: {} / {}", total_matched_targets, total_possible_targets);
             break;
         } else {
             if attempts >= 3 {
-                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (100.0 米) or low success rate after {} attempts.",
-                       successful_runs, overall_avg_error, attempts);
+                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (100.0 米) or low success rate after {} attempts. Total matched targets: {} / {}.",
+                        successful_runs, overall_avg_error, attempts, total_matched_targets, total_possible_targets);
             }
             println!("第 {} 次尝试失败，正在重试...", attempts);
         }
@@ -160,7 +170,7 @@ fn test_localization_with_sparse_data() {
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let (overall_avg_error, successful_runs) = run_test_case(
+        let (overall_avg_error, successful_runs, total_matched_targets) = run_test_case(
             "稀疏数据",
             5,
             3,
@@ -175,14 +185,18 @@ fn test_localization_with_sparse_data() {
             0.002,
             10.0,
         );
+        let total_possible_targets = 5 * 3;
+        let success_rate = total_matched_targets as f64 / total_possible_targets as f64;
+
         // 在数据稀疏的场景下，定位精度会自然下降，因此将可接受的阈值调整到更宽泛的范围。
-        if overall_avg_error < 150.0 && successful_runs >= 3 {
+        if overall_avg_error < 150.0 && successful_runs >= 3 && success_rate >= 0.6 {
             println!("第 {} 次尝试成功通过。", attempts);
+            println!("总匹配目标数: {} / {}", total_matched_targets, total_possible_targets);
             break;
         } else {
             if attempts >= 3 {
-                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (150.0 米) or low success count after {} attempts.",
-                       successful_runs, overall_avg_error, attempts);
+                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (150.0 米) or low success count after {} attempts. Total matched targets: {} / {}.",
+                        successful_runs, overall_avg_error, attempts, total_matched_targets, total_possible_targets);
             }
             println!("第 {} 次尝试失败，正在重试...", attempts);
         }
@@ -194,7 +208,7 @@ fn test_localization_with_overlapping_targets() {
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let (overall_avg_error, successful_runs) = run_test_case(
+        let (overall_avg_error, successful_runs, total_matched_targets) = run_test_case(
             "重叠目标",
             5,
             3,
@@ -209,14 +223,18 @@ fn test_localization_with_overlapping_targets() {
             0.001,
             5.0,
         );
+        let total_possible_targets = 5 * 3;
+        let success_rate = total_matched_targets as f64 / total_possible_targets as f64;
+        
         // Overlapping targets might lead to slightly higher errors and fewer successful runs.
-        if overall_avg_error < 100.0 && successful_runs >= 2 {
+        if overall_avg_error < 100.0 && successful_runs >= 2 && success_rate >= 0.5 {
             println!("第 {} 次尝试成功通过。", attempts);
+            println!("总匹配目标数: {} / {}", total_matched_targets, total_possible_targets);
             break;
         } else {
             if attempts >= 3 {
-                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (100.0 米) or low success count after {} attempts.",
-                       successful_runs, overall_avg_error, attempts);
+                panic!("{} 次成功运行的整体平均误差 {:.2} 米超过了可接受的阈值 (100.0 米) or low success count after {} attempts. Total matched targets: {} / {}.",
+                        successful_runs, overall_avg_error, attempts, total_matched_targets, total_possible_targets);
             }
             println!("第 {} 次尝试失败，正在重试...", attempts);
         }

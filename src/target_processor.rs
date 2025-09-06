@@ -1,13 +1,12 @@
 // src/target_processor.rs
 
-// 导入 nalgebra 库
 use nalgebra as na;
-use na::{Point3, Vector3};
+use na::{DMatrix, DVector, Matrix3, Point3, Vector3};
 use rand::prelude::*;
 use std::collections::HashSet;
 
 // --- 数据结构 ---
-// Measurement 代表原始的传感器数据，保留 f64 类型
+// Measurement 表示原始传感器数据
 pub struct Measurement {
     pub x: f64,
     pub y: f64,
@@ -20,24 +19,18 @@ pub struct Measurement {
 #[derive(Debug, Clone)]
 pub struct LocatedTarget {
     pub id: String,
-    pub position: Point3<f64>, // 使用 Point3 存储位置
-    pub num_lines: usize,
-    pub avg_error_dist_m: f64,
+    pub position: Point3<f64>, // 目标位置
+    pub num_lines: usize,      // 用于拟合的光线数量
+    pub avg_error_dist_m: f64, // 平均残差（米）
 }
 
 #[derive(Clone, Copy)]
 pub struct Line {
-    pub start: Point3<f64>,
-    pub direction: Vector3<f64>,
+    pub start: Point3<f64>,     // 光线起点
+    pub direction: Vector3<f64>, // 单位化方向
 }
 
-/// 将 Measurement 结构体转换为 Line 结构体，并归一化方向向量。
-///
-/// # 参数
-/// * `m` - 一个 `Measurement` 的引用。
-///
-/// # 返回值
-/// 相应的 `Line` 结构体，其中方向向量已被归一化。
+/// Measurement → Line
 fn get_line(m: &Measurement) -> Line {
     let start_point = Point3::new(m.x, m.y, m.z);
     let direction = Vector3::new(m.direction_x, m.direction_y, m.direction_z).normalize();
@@ -47,16 +40,7 @@ fn get_line(m: &Measurement) -> Line {
     }
 }
 
-/// 计算两条空间光线之间最短距离的中点。
-///
-/// 此中点作为这两条光线所代表的目标位置的一个初步近似。
-///
-/// # 参数
-/// * `line1` - 第一个 `Line` 的引用。
-/// * `line2` - 第二个 `Line` 的引用。
-///
-/// # 返回值
-/// 一个 `Point3<f64>`，表示两光线最短距离的中点。
+/// 求两条光线之间的最近点中点
 fn find_closest_midpoint(line1: &Line, line2: &Line) -> Point3<f64> {
     let w0 = line1.start - line2.start;
     let a = line1.direction.dot(&line1.direction);
@@ -66,6 +50,7 @@ fn find_closest_midpoint(line1: &Line, line2: &Line) -> Point3<f64> {
     let e = line2.direction.dot(&w0);
     let denom = a * c - b * b;
     if denom.abs() < 1e-6 {
+        // 平行或接近平行，直接返回起点平均
         return Point3::from((line1.start.coords + line2.start.coords) * 0.5);
     }
     let s = (b * e - c * d) / denom;
@@ -75,50 +60,82 @@ fn find_closest_midpoint(line1: &Line, line2: &Line) -> Point3<f64> {
     Point3::from((closest_point1.coords + closest_point2.coords) * 0.5)
 }
 
-/// 使用梯度下降法优化目标位置。
+/// 使用 Levenberg-Marquardt 优化点到多条光线的残差
 ///
-/// 它通过最小化目标点到所有光线的距离平方和来寻找最优解。
-///
-/// # 参数
-/// * `lines` - 参与优化的光线集合。
-/// * `initial_guess` - 优化过程的初始猜测位置。
-/// * `learning_rate` - 梯度下降的学习率，控制每次迭代的步长。
-/// * `iterations` - 梯度下降的迭代次数。
-///
-/// # 返回值
-/// 一个 `Point3<f64>`，表示经过优化后的目标位置。
-pub fn gradient_descent_optimize(
+/// 残差定义为：点到每条光线的垂直向量 `distance_vec`
+/// 维度为 `3n`，LM 会最小化所有残差向量的平方和。
+pub fn levenberg_marquardt_optimize(
     lines: &[Line],
     initial_guess: Point3<f64>,
-    learning_rate: f64,
     iterations: usize,
+    initial_lambda: f64,
 ) -> Point3<f64> {
     let mut current_pos = initial_guess;
+    let mut lambda = initial_lambda;
+    let lambda_factor_up = 10.0;
+    let lambda_factor_down = 0.1;
+
     for _ in 0..iterations {
-        let mut total_gradient = Vector3::zeros();
-        for line in lines {
+        let n = lines.len();
+        let mut j = DMatrix::zeros(3 * n, 3);
+        let mut e = DVector::zeros(3 * n);
+
+        // 构建残差向量 e 和雅可比矩阵 J
+        for (i, line) in lines.iter().enumerate() {
             let pa = current_pos - line.start;
-            let a = line.direction;
-            let projection_factor = pa.dot(&a);
-            let distance_vec = pa - a * projection_factor;
-            let gradient = distance_vec * 2.0;
-            total_gradient += gradient;
+            let proj = pa.dot(&line.direction);
+            let distance_vec = pa - line.direction * proj; // 垂直分量
+
+            // 残差
+            e.rows_mut(3 * i, 3).copy_from(&DVector::from_column_slice(distance_vec.as_slice()));
+
+            // 雅可比：残差 = (p - start) - d ( (p - start)·d )
+            // 对 p 的导数 ≈ I - d dᵀ
+            let jac_block = Matrix3::identity() - line.direction * line.direction.transpose();
+            j
+                .view_mut((3 * i, 0), (3, 3))
+                .copy_from(&jac_block);
         }
-        current_pos -= total_gradient * learning_rate;
+
+        let j_t = j.transpose();
+        let h_approx = &j_t * &j;
+        let b = &j_t * &e;
+
+        // LM 更新： (H + λI) Δp = -b
+        let h_lm = h_approx + Matrix3::identity() * lambda;
+        let delta = match h_lm.try_inverse() {
+            Some(inv_h) => inv_h * -b,
+            None => {
+                lambda *= lambda_factor_up;
+                continue;
+            }
+        };
+
+        let delta_vec = Vector3::new(delta[0], delta[1], delta[2]);
+        let new_pos = current_pos + delta_vec;
+
+        // 计算误差平方和
+        let mut new_error_sq = 0.0;
+        for line in lines.iter() {
+            let pa = new_pos - line.start;
+            let proj = pa.dot(&line.direction);
+            let dist_vec = pa - line.direction * proj;
+            new_error_sq += dist_vec.norm_squared();
+        }
+        let current_error_sq: f64 = e.norm_squared();
+
+        // 接受或拒绝更新
+        if new_error_sq < current_error_sq {
+            current_pos = new_pos;
+            lambda *= lambda_factor_down; // 更接近高斯牛顿
+        } else {
+            lambda *= lambda_factor_up; // 更接近梯度下降
+        }
     }
     current_pos
 }
 
-/// 使用 RANSAC 算法从包含异常值的光线中，找到最佳拟合的光线子集（即“内点”）。
-///
-/// # 参数
-/// * `all_lines` - 包含所有测量光线的向量。
-/// * `ransac_iterations` - RANSAC 算法的迭代次数。
-/// * `ransac_threshold` - 判断一条光线是否为内点的距离阈值。
-/// * `min_lines` - 识别一个目标所需的最小内点数量，低于此数量则认为未找到有效模型。
-///
-/// # 返回值
-/// 一个 `Option<(Point3<f64>, Vec<usize>)>`。如果找到一个有效的模型，它将返回一个包含初始猜测位置和内点索引的元组；否则返回 `None`。
+/// RANSAC 拟合光线集合，寻找最大内点集
 pub fn ransac_fit_lines(
     all_lines: &[Line],
     ransac_iterations: usize,
@@ -134,6 +151,7 @@ pub fn ransac_fit_lines(
     }
 
     for _ in 0..ransac_iterations {
+        // 随机选取 3 条线
         let mut sample_indices = HashSet::new();
         while sample_indices.len() < 3 {
             sample_indices.insert(rng.gen_range(0..all_lines.len()));
@@ -141,17 +159,19 @@ pub fn ransac_fit_lines(
         let sample_indices_vec: Vec<_> = sample_indices.iter().copied().collect();
         let sample_lines: Vec<_> = sample_indices_vec.iter().map(|&i| all_lines[i]).collect();
 
+        // 初始猜测：3 条光线两两最近点的平均
         let initial_guess = (find_closest_midpoint(&sample_lines[0], &sample_lines[1]).coords
             + find_closest_midpoint(&sample_lines[0], &sample_lines[2]).coords
             + find_closest_midpoint(&sample_lines[1], &sample_lines[2]).coords)
             / 3.0;
         let initial_guess = Point3::from(initial_guess);
 
+        // 统计内点
         let mut current_inliers_indices = Vec::new();
         for (i, line) in all_lines.iter().enumerate() {
             let pa = initial_guess - line.start;
-            let projection_factor = pa.dot(&line.direction);
-            let distance = (pa - line.direction * projection_factor).norm();
+            let proj = pa.dot(&line.direction);
+            let distance = (pa - line.direction * proj).norm();
             if distance < ransac_threshold {
                 current_inliers_indices.push(i);
             }
@@ -172,17 +192,7 @@ pub fn ransac_fit_lines(
     }
 }
 
-/// 从所有测量数据中识别并定位多个目标。
-///
-/// 它通过一个循环，重复执行 RANSAC 和梯度下降过程，直到所有可识别的目标都被找到。
-///
-/// # 参数
-/// * `data` - 包含所有原始 `Measurement` 数据的切片。
-/// * `ransac_threshold_m` - RANSAC 算法的距离阈值。
-/// * `min_lines_per_target` - 识别一个目标所需的最小测量线数量。
-///
-/// # 返回值
-/// 一个 `Vec<LocatedTarget>`，其中包含所有成功定位的目标信息。
+/// 综合使用 RANSAC + LM 定位多个目标
 pub fn find_targets(
     data: &[Measurement],
     ransac_threshold_m: f64,
@@ -193,12 +203,12 @@ pub fn find_targets(
     let mut used_line_indices = HashSet::new();
     let mut target_id_counter = 1;
 
-    let num_measurements = all_lines.len();
-    if num_measurements < min_lines_per_target {
+    if all_lines.len() < min_lines_per_target {
         return located_targets;
     }
 
     loop {
+        // 筛选未使用的光线
         let remaining_lines_map: Vec<_> = all_lines
             .iter()
             .enumerate()
@@ -225,14 +235,16 @@ pub fn find_targets(
                 .map(|&i| all_lines[i])
                 .collect();
 
-            let final_pos = gradient_descent_optimize(&target_lines, initial_guess, 0.001, 200);
+            // LM 优化
+            let final_pos = levenberg_marquardt_optimize(&target_lines, initial_guess, 200, 0.001);
 
+            // 计算平均残差
             let mut total_error_sq = 0.0;
             for line in &target_lines {
                 let pa = final_pos - line.start;
-                let projection_factor = pa.dot(&line.direction);
-                let distance_vec = pa - line.direction * projection_factor;
-                total_error_sq += distance_vec.norm_squared();
+                let proj = pa.dot(&line.direction);
+                let dist_vec = pa - line.direction * proj;
+                total_error_sq += dist_vec.norm_squared();
             }
             let avg_error_dist = (total_error_sq / target_lines.len() as f64).sqrt();
 
@@ -259,7 +271,6 @@ pub fn find_targets(
 mod tests {
     use super::*;
 
-    // 测试 get_line 函数，确保方向向量被正确归一化
     #[test]
     fn test_get_line_normalization() {
         let measurement = Measurement {
@@ -274,10 +285,8 @@ mod tests {
         assert!((line.direction.norm() - 1.0).abs() < 1e-9);
     }
 
-    // 测试 find_closest_midpoint 函数
     #[test]
     fn test_find_closest_midpoint() {
-        // 两条光线在 (5, 5, 0) 处相交
         let line1 = Line {
             start: Point3::new(0.0, 5.0, 0.0),
             direction: Vector3::new(1.0, 0.0, 0.0).normalize(),
@@ -292,31 +301,35 @@ mod tests {
         assert!((midpoint.y - 5.0).abs() < epsilon);
         assert!((midpoint.z - 0.0).abs() < epsilon);
     }
-    
-    // 测试 ransac_fit_lines 函数
+
     #[test]
     fn test_ransac_fit_lines() {
         let mut lines = Vec::new();
-        // 添加 10 条完美的内点光线，相交于 (10, 20, 30)
         for _ in 0..10 {
-            let start = Point3::new(thread_rng().gen_range(0.0..5.0), thread_rng().gen_range(15.0..25.0), thread_rng().gen_range(25.0..35.0));
+            let start = Point3::new(
+                thread_rng().gen_range(0.0..5.0),
+                thread_rng().gen_range(15.0..25.0),
+                thread_rng().gen_range(25.0..35.0),
+            );
             let direction = (Point3::new(10.0, 20.0, 30.0) - start).normalize();
             lines.push(Line { start, direction });
         }
-        // 添加 5 条噪声光线（异常值）
         for _ in 0..5 {
-            let start = Point3::new(thread_rng().gen_range(-50.0..50.0), thread_rng().gen_range(-50.0..50.0), thread_rng().gen_range(-50.0..50.0));
-            let direction = Vector3::new(thread_rng().gen(), thread_rng().gen(), thread_rng().gen()).normalize();
+            let start = Point3::new(
+                thread_rng().gen_range(-50.0..50.0),
+                thread_rng().gen_range(-50.0..50.0),
+                thread_rng().gen_range(-50.0..50.0),
+            );
+            let direction =
+                Vector3::new(thread_rng().gen(), thread_rng().gen(), thread_rng().gen()).normalize();
             lines.push(Line { start, direction });
         }
 
         let result = ransac_fit_lines(&lines, 100, 1.0, 3);
         assert!(result.is_some());
-        
+
         if let Some((initial_guess, inliers_indices)) = result {
-            // 确保至少找到了 8 条内点
             assert!(inliers_indices.len() >= 8);
-            // 确保 RANSAC 找到的初始猜测位置接近真实位置
             let epsilon = 1e-1;
             assert!((initial_guess.x - 10.0).abs() < epsilon);
             assert!((initial_guess.y - 20.0).abs() < epsilon);
@@ -324,10 +337,8 @@ mod tests {
         }
     }
 
-    // 梯度下降测试
     #[test]
-    fn test_gradient_descent_with_perfect_data() {
-        // 创建一个简单的场景：两条光线完美相交于 (0, 0, 10)
+    fn test_levenberg_marquardt_with_perfect_data() {
         let line1 = Line {
             start: Point3::new(-10.0, 0.0, 10.0),
             direction: Vector3::new(1.0, 0.0, 0.0),
@@ -338,17 +349,14 @@ mod tests {
         };
         let lines = vec![line1, line2];
 
-        // 设定一个初始猜测，它离真实解不远
-        let initial_guess = Point3::new(1.0, 1.0, 10.0);
-        let learning_rate = 0.01;
-        // 增加迭代次数以保证收敛
-        let iterations = 1000;
+        let initial_guess = Point3::new(100.0, 100.0, 100.0);
+        let initial_lambda = 0.01;
+        let iterations = 200;
 
-        // 运行梯度下降优化
-        let final_pos = gradient_descent_optimize(&lines, initial_guess, learning_rate, iterations);
-        let epsilon = 1e-4;
+        let final_pos =
+            levenberg_marquardt_optimize(&lines, initial_guess, iterations, initial_lambda);
+        let epsilon = 1e-6;
 
-        // 断言最终位置非常接近 (0, 0, 10)
         assert!((final_pos.x - 0.0).abs() < epsilon);
         assert!((final_pos.y - 0.0).abs() < epsilon);
         assert!((final_pos.z - 10.0).abs() < epsilon);

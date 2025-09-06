@@ -1,136 +1,117 @@
-# 一种基于RANSAC与梯度下降的3D目标高精度定位方法
+# 一种基于RANSAC与Levenberg-Marquardt的3D目标高精度定位方法
 
 ## 摘要
 
-本文提出了一种用于解决复杂环境中三维空间目标定位问题的新方法。该方法结合了**RANSAC（随机抽样一致）算法的鲁棒性和梯度下降**算法的精确性。通过多测量站点的方位数据，本系统能够有效识别并剔除由噪声产生的异常测量值，并对真实目标位置进行高精度优化。实验结果表明，该方法在处理大量噪声和异常数据时表现出优秀的稳定性和准确性。
+本文提出了一种用于解决复杂环境中三维空间目标定位问题的新方法。该方法结合了**RANSAC（随机抽样一致）算法的鲁棒性**和**Levenberg-Marquardt（LM）算法的精确性**。通过多测量站点的方位数据，本系统能够有效识别并剔除由噪声产生的异常测量值，并对真实目标位置进行高精度优化。实验结果表明，该方法在处理大量噪声和异常数据时表现出优秀的稳定性和准确性。
 
 ## 引言
 
-在目标追踪、军事侦察和无人机定位等领域，对三维空间中运动或静止目标的精确位置获取至关重要。传统的交汇定位方法依赖于多条光线在空间中精确交汇于一点。然而，在实际应用中，由于传感器误差、环境干扰等因素，光线通常无法精确相交，而是形成一个混乱的交点云。这使得传统方法失效，并对定位精度提出了严峻的挑战。
+本项目的灵感来自 [Pixeltovoxelprojector](https://github.com/ConsistentlyInconsistentYT/Pixeltovoxelprojector) \[1\]。设想一个场景，相距不远的几台普通摄像机对着天空拍摄，通过帧差分检测画面中运动的物体，计算得出目标相对于摄像机的朝向和仰角，并提交给处理模块。
 
-为了解决这一问题，我们设计了一套包含两个核心步骤的定位流程，以应对数据中的不确定性和噪声。
+处理模块需要建立笛卡尔坐标系，将摄像机获取的数据绘制为空间直线，求解出直线的交点，找到被拍摄目标的空间坐标。为此，设计了一套包含两个核心步骤的定位流程：**基于RANSAC的异常值剔除** 和 **基于Levenberg-Marquardt的精确优化**
 
 ## 数学算法与原理
 
-该方法的核心是两个互补的数学算法：RANSAC算法和梯度下降法。
+该方法核心为两种互补算法：
 
-* **RANSAC**：一种用于在充满异常值的数据集中，通过随机采样找到最佳模型参数的迭代方法。它能有效识别并分离出属于真实目标的测量数据。
+* **RANSAC**：随机采样一致算法，可在含有异常值的数据中找到最佳模型参数 \[2\]。
+* **Levenberg-Marquardt (LM)**：非线性最小二乘优化算法，优化点到光线的距离平方和 \[3,4\]。
 
-* **梯度下降**：一种强大的优化算法，用于寻找函数的最小值。在这里，它被用于找到一个位置，使得该位置到所有真实光线的距离之和最小。
+### 算法选择理由
 
-### 为什么选择这些算法？
+相较于该项目的早期验证版本，使用RANSAC和LM替换了原本的DBSCAN和梯度下降算法，理由如下：
 
-* **RANSAC解决了鲁棒性问题**: 现实世界的传感器数据充满了异常值（错误测量）。传统方法容易受这些异常值影响而失效。RANSAC能够从大量混乱的数据中，通过反复验证，找到最可靠的数据子集，从而有效过滤掉噪声。它确保了我们的定位过程从一个“干净”的数据集开始，这是实现稳定性的关键。
-
-* **梯度下降解决了精度问题**: RANSAC提供的结果虽然可靠，但只是一个粗略的“最佳猜测”。为了达到工业级的高精度，我们需要对这个猜测进行微调。梯度下降是一种强大的优化工具，它能通过迭代计算，精确地找到一个数学上的最优解，将误差最小化到极点，从而实现了亚米级的定位精度。
-
-* **互补的流程**: RANSAC负责找到正确的测量数据，而梯度下降负责利用这些正确数据进行精确计算。这种分工合作的流程，使得系统既能抵抗最恶劣的噪声，又能保证最终结果的准确性。
+* **RANSAC vs DBSCAN**：RANSAC专注于拟合，通过随机采样找到最匹配的光线子集。DBSCAN属于通用聚类算法，需要额外判断簇对应目标，在多目标或噪声环境下容易出错。
+* **LM vs 梯度下降**：梯度下降需要手动调学习率，且易受初值影响。LM通过阻尼因子动态调整，实现梯度下降与牛顿法自适应切换，提高收敛速度与精度。
 
 ## 目标处理流程
 
-整个定位流程由核心函数 `find_targets` 协调。该函数负责管理数据流，并迭代处理所有可能的目标。
+核心函数 `find_targets` 协调整个流程：
 
----
+```markdown
+原始测量数据 → 光线建模(get_line) → RANSAC筛选(ransac_fit_lines)
+→ Levenberg-Marquardt优化(levenberg_marquardt_optimize) → 平均误差计算 → 输出LocatedTarget
+```
 
-`find_targets` 函数
+* **输入**：
+  * `data`：测量数据数组
+  * `ransac_threshold_m`：内点阈值
+  * `min_lines_per_target`：目标最少光线数
+* **输出**：
+  * `Vec<LocatedTarget>`：包含目标位置、光线数量及平均残差
+* **流程**：
+  1. 将测量数据转换为光线对象
+  2. 循环识别目标
+  3. 对剩余光线执行 `ransac_fit_lines`，得到候选初始位置及内点集合
+  4. 使用 `levenberg_marquardt_optimize` 精确优化
+  5. 计算平均误差，生成 `LocatedTarget`
+  6. 标记使用光线，避免重复
+  7. 若无法找到新的内点模型则结束循环
 
-* **接收参数**：
+## 算法模块说明
 
-  * `data`: 原始的测量数据数组。
+### RANSAC 算法模块
 
-  * `ransac_threshold_m`: RANSAC内点阈值，用于判断光线是否属于某一目标。
+随机迭代寻找内点最多的模型，为优化提供可靠初值 \[2\]。
 
-  * `min_lines_per_target`: 识别一个目标所需的最小光线数量。
+```rust
+pub fn ransac_fit_lines(
+    all_lines: &[Line],
+    ransac_iterations: usize,
+    ransac_threshold: f64,
+    min_lines: usize,
+) -> Option<(Point3<f64>, Vec<usize>)> { ... }
+```
 
-* **输出数据**：
+### Levenberg-Marquardt 算法模块
 
-  * `Vec<LocatedTarget>`: 一个包含所有已定位目标的向量。每个 `LocatedTarget` 对象都包含目标的最终坐标、参与定位的光线数量和误差。
+迭代优化目标位置，使点到光线的距离平方和最小。通过调整阻尼因子，自动切换梯度下降与高斯-牛顿法，提高收敛速度和精度 \[3, 4\]。
 
-* **处理流程**：
+```rust
+pub fn levenberg_marquardt_optimize(
+    lines: &[Line],
+    initial_guess: Point3<f64>,
+    iterations: usize,
+    initial_lambda: f64,
+) -> Point3<f64> { ... }
+```
 
-  1. 函数首先将原始测量数据转换为便于计算的“光线”对象。
+## Rust工程实现
 
-  2. 进入一个循环，在每次迭代中寻找一个新目标。
+核心算法完全使用内置 Rust 代码实现，只依赖 nalgebra 提供矩阵与向量运算和 rand 提供的随机数。可快速编译部署至 RISC-V/ARM 平台。
 
-  3. 它筛选出所有未被其他已识别目标使用的光线，如果剩余光线数量不足，则退出循环。
+包含单元测试：
 
-  4. 调用 `ransac_fit_lines` 函数，从剩余光线中寻找一个最佳的初始猜测和对应的内点集合。
-
-  5. 如果 `ransac_fit_lines` 成功找到了一个合格的内点集合，则调用 `gradient_descent_optimize` 函数对该集合进行精确定位。
-
-  6. 将最终的定位结果保存到 `located_targets` 列表中。
-
-  7. 将本次用于定位的光线标记为已使用，避免重复处理。
-
-  8. 如果 `ransac_fit_lines` 未能找到合格的内点集合，则认为没有更多目标可以识别，退出循环。
-
-## 各算法模块说明
-
-### **RANSAC 算法模块**
-
-RANSAC算法的核心在于通过随机迭代寻找内点数量最多的模型，为梯度下降提供可靠的初始值。
-
-`ransac_fit_lines` 函数
-
-* **接收参数**：
-
-  * `all_lines`: 待处理的光线数据数组。
-
-  * `ransac_iterations`: 迭代次数，即寻找最佳模型的尝试次数。
-
-  * `ransac_threshold`: 内点阈值，用于判断光线是否属于当前模型。
-
-  * `min_lines`: 识别一个合格模型所需的最小光线数量。
-
-* **输出数据**：
-
-  * `Option<(Point3, Vec<usize>)>`: 如果找到了一个合格的模型，则返回一个包含**初始猜测位置**和**内点索引列表**的元组；否则返回 `None`。
-
-### **梯度下降法模块**
-
-梯度下降法通过迭代更新，将RANSAC提供的初始位置优化到最精确的位置。
-
-`gradient_descent_optimize` 函数
-
-* **接收参数**：
-
-  * `lines`: 已被RANSAC筛选出的内点光线数组。
-
-  * `initial_guess`: RANSAC提供的粗略位置猜测。
-
-  * `learning_rate`: 学习率，决定了每一步更新的幅度。
-
-  * `iterations`: 迭代次数，即位置更新的次数。
-
-* **输出数据**：
-
-  * `Point3`: 经过精确优化后的最终目标位置。
-
-## 关于本项目的代码实现
-
-项目代码全部采用Rust编写，RANSAC和梯度下降算法也使用了纯Rust实现以避免对C语言代码的依赖，**这些算法的部分源码使用Gemini 2.5 Flash辅助编写**。
-
-Rust提供了优秀的性能和内存安全，并且其跨平台性能允许用户将这些代码快速部署在各种平台上（例如RISC-V和ARM这类的低功耗、微型平台）。
-
-另外，项目中还包含了一个自动化测试，可以自行进行算法的精准度测试。
+* 向量归一化验证
+* 光线交点计算验证
+* RANSAC鲁棒性测试
+* LM精度验证
 
 ## 结论
 
-通过将RANSAC算法与梯度下降法结合，我们成功构建了一个对数据噪声和异常值具有高鲁棒性的三维目标自动定位系统。该系统能够准确地从杂乱的光线交汇数据中分离并定位出多个独立目标。这个混合算法框架为未来在复杂和不确定环境中进行精确空间定位提供了可行的解决方案。
+结合 RANSAC 与 LM 算法，实现了对噪声和异常值具有高鲁棒性的三维目标定位系统。该方法能从复杂光线交汇数据中准确识别并定位多个目标，为复杂和不确定环境下的精确空间定位提供可行方案。
 
-## 下一步……
+## 实验数据
 
-该方案已经能够实现对目标的检测，但仍然有一些不足：
+运行 `charts.py` 可以自动生成可视化数据图表(需要先执行 `cargo build`，非Windows环境请修改python文件中的可执行文件位置)，某一次运行的结果如下：
+[](./sample_result.png)
 
-1. 当前的 RANSAC 参数是固定的，但可以通过引入自适应机制，根据实时数据质量（例如，噪声水平或光线数量）动态调整 `ransac_threshold` 和 `min_lines_per_target`，从而在不同环境中获得更优表现。
-2. 针对移动目标，可以整合卡尔曼滤波器。这将允许系统不仅定位目标位置，还能预测目标的运动轨迹。
-3. 单元测试并未包含对不同生成器参数和处理器参数的分析和评估
-4. 依据对单元测试结果的统计，每一百次测试中（每一次测试包含10次生成与计算），有约83%的结果是通过的（指目标数量和距离误差符合容错），但仍然有误差超过容限（100米）的情况，且暂时没有分析误差来源
+[](./sample_accuracy.png)
 
 ## 参考文献
 
-[1] Fischler, M. A., & Bolles, R. C. (1981). Random sample consensus: a paradigm for model fitting with applications to image analysis and automated cartography. *Communications of the ACM*, 24(6), 381-395.
+[1] Pixeltovoxelprojector: (<https://github.com/ConsistentlyInconsistentYT/Pixeltovoxelprojector/>)
 
-[2] Levenberg, K. (1944). A method for the solution of certain non-linear problems in least squares. *Quarterly of Applied Mathematics*, 2(2), 164-168.
+[2] Fischler, M. A., & Bolles, R. C. (1981). Random sample consensus: a paradigm for model fitting with applications to image analysis and automated cartography. Communications of the ACM, 24(6), 381–395. (<https://dl.acm.org/doi/10.1145/358669.358692>)
 
-[3] Marquardt, D. W. (1963). An algorithm for least-squares estimation of nonlinear parameters. *Journal of the Society for Industrial and Applied Mathematics*, 11(2), 431-441.
+[3] Levenberg, K. (1944). A method for the solution of certain non-linear problems in least squares. Quarterly of Applied Mathematics, 2(2), 164–168. (<https://www.jstor.org/stable/43633451>)
+
+[4] Marquardt, D. W. (1963). An algorithm for least-squares estimation of nonlinear parameters. Journal of the Society for Industrial and Applied Mathematics, 11(2), 431–441. (<https://www.jstor.org/stable/2098941>)
+
+[5] Szeliski, R. (2010). Computer Vision: Algorithms and Applications. Springer. 公开出版物链接: (<https://vim.ustc.edu.cn/_upload/article/files/d4/87/71e9467745a5a7b8e80e94007d1b/4cd69b21-85d3-43ba-9935-fd9ae33da82b.pdf>)
+
+编写项目源码时，使用了Gemini 2.5 Flash辅助解释算法原理（我不会高数啊！）
+
+***
+
+本项目的Github地址：<https://github.com/ArthurZhou/opti_radar>
